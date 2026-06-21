@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useCallback } from 'react';
+import { useMemo, useRef, useState, useCallback, useLayoutEffect } from 'react';
 import { Smartphone, RotateCw, RefreshCw, ExternalLink, Hand } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +59,32 @@ export default function MobilePreviewPanel() {
 
   const frameW = landscape ? device.height : device.width;
   const frameH = landscape ? device.width : device.height;
+
+  // ابعاد بیرونی قاب گوشی (با حاشیهٔ بدنه)
+  const outerW = frameW + 24;
+  const outerH = frameH + 24;
+
+  // ── مقیاس خودکار: قاب گوشی را متناسب با عرض پنل کوچک می‌کنیم تا هر سایز گوشی
+  //    (حتی Pro Max یا حالت افقی) کامل و بدون اسکرول روی همهٔ نمایشگرها دیده شود.
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  useLayoutEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const compute = () => {
+      const avail = el.clientWidth - 8; // کمی حاشیه
+      const s = Math.min(1, avail / outerW);
+      setScale(s > 0 && Number.isFinite(s) ? s : 1);
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    window.addEventListener('resize', compute);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', compute);
+    };
+  }, [outerW]);
 
   const src = useMemo(
     () => `${baseDocUrl()}${route}`,
@@ -251,17 +277,21 @@ export default function MobilePreviewPanel() {
         </div>
       </div>
 
-      {/* قاب گوشی */}
-      <div className="flex justify-center py-6 bg-gradient-to-b from-gray-100 to-gray-50 rounded-2xl border border-gray-100 overflow-auto">
-        <div
-          className="relative bg-black shadow-2xl shrink-0"
-          style={{
-            width: frameW + 24,
-            height: frameH + 24,
-            borderRadius: device.radius + 12,
-            padding: 12,
-          }}
-        >
+      {/* قاب گوشی — با مقیاس خودکار تا هر اندازهٔ گوشی روی هر نمایشگری کامل جا شود */}
+      <div ref={stageRef} className="flex justify-center py-6 bg-gradient-to-b from-gray-100 to-gray-50 rounded-2xl border border-gray-100 overflow-hidden">
+        {/* جای‌نگه‌دار با ابعاد مقیاس‌خورده تا ارتفاع به‌درستی رزرو شود */}
+        <div style={{ width: outerW * scale, height: outerH * scale }}>
+          <div
+            className="relative bg-black shadow-2xl"
+            style={{
+              width: outerW,
+              height: outerH,
+              borderRadius: device.radius + 12,
+              padding: 12,
+              transform: `scale(${scale})`,
+              transformOrigin: 'top left',
+            }}
+          >
           {device.notch && !landscape && (
             <div
               className="absolute top-3 left-1/2 -translate-x-1/2 z-10 bg-black rounded-b-2xl"
@@ -282,6 +312,7 @@ export default function MobilePreviewPanel() {
               className="w-full h-full border-0 bg-white"
               style={{ width: frameW, height: frameH }}
             />
+          </div>
           </div>
         </div>
       </div>

@@ -1,11 +1,15 @@
-import { useMemo, useRef, useState } from 'react';
-import { Smartphone, RotateCw, RefreshCw, ExternalLink } from 'lucide-react';
+import { useMemo, useRef, useState, useCallback } from 'react';
+import { Smartphone, RotateCw, RefreshCw, ExternalLink, Hand } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // پیش‌نمایش موبایل: سایت را داخل یک قاب واقعیِ گوشی (iframe) نمایش می‌دهد تا مدیر
 // بتواند دقیقاً مثل یک گوشی موبایل ظاهر سایت را ببیند. چون کل اپ با HashRouter
 // اجرا می‌شود، با باز کردن همان index.html داخل iframe یک نمونهٔ تازه از سایت روی
 // مسیر انتخاب‌شده بوت می‌شود و تغییرات منتشرشده (از localStorage هم‌مبدأ) هم دیده می‌شود.
+//
+// «حالت لمسی»: چون با ماوس روی دسکتاپ نمی‌توان مثل انگشت کارت‌ها/کاروسل‌ها را کشید،
+// یک شبیه‌ساز لمس داخل iframe تزریق می‌کنیم که کشیدنِ ماوس را به اسکرول (افقی برای
+// کاروسل کارت‌ها و عمودی برای کل صفحه) تبدیل می‌کند — دقیقاً مثل کشیدن انگشت.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Device = {
@@ -13,7 +17,6 @@ type Device = {
   label: string;
   width: number;
   height: number;
-  // شعاع گردیِ قاب و وجود ناچ برای ظاهر واقعی‌تر
   radius: number;
   notch: boolean;
 };
@@ -26,7 +29,6 @@ const DEVICES: Device[] = [
   { id: 'galaxy-s8', label: 'Galaxy S8+', width: 360, height: 740, radius: 44, notch: false },
 ];
 
-// مسیرهای رایج سایت که می‌توان داخل پیش‌نمایش باز کرد.
 const ROUTES: { path: string; label: string }[] = [
   { path: '#/', label: 'صفحهٔ اصلی' },
   { path: '#/support', label: 'پشتیبانی' },
@@ -35,7 +37,6 @@ const ROUTES: { path: string; label: string }[] = [
   { path: '#/account', label: 'پنل کاربری' },
 ];
 
-// آدرس پایهٔ سند فعلی بدون هش (روی dev و GitHub Pages هر دو درست کار می‌کند).
 function baseDocUrl(): string {
   return window.location.href.split('#')[0];
 }
@@ -45,26 +46,128 @@ export default function MobilePreviewPanel() {
   const [landscape, setLandscape] = useState(false);
   const [route, setRoute] = useState<string>('#/');
   const [reloadKey, setReloadKey] = useState(0);
+  const [touchDrag, setTouchDrag] = useState(true);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  // مرجعِ زندهٔ وضعیت «حالت لمسی» تا هندلرهای داخل iframe همیشه مقدار به‌روز را بخوانند.
+  const touchDragRef = useRef(touchDrag);
+  touchDragRef.current = touchDrag;
 
   const device = useMemo(
     () => DEVICES.find((d) => d.id === deviceId) ?? DEVICES[1],
     [deviceId],
   );
 
-  // در حالت افقی عرض و ارتفاع جابه‌جا می‌شوند.
   const frameW = landscape ? device.height : device.width;
   const frameH = landscape ? device.width : device.height;
 
   const src = useMemo(
     () => `${baseDocUrl()}${route}`,
-    // reloadKey باعث می‌شود با هر رفرش src تازه ساخته شود
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [route, reloadKey],
   );
 
   const reload = () => setReloadKey((k) => k + 1);
   const openInNewTab = () => window.open(src, '_blank');
+
+  // ── تزریق شبیه‌ساز لمس داخل iframe پس از بارگذاری ──
+  const installTouchEmulation = useCallback(() => {
+    const frame = iframeRef.current;
+    if (!frame) return;
+    let doc: Document | null = null;
+    let win: Window | null = null;
+    try {
+      doc = frame.contentDocument;
+      win = frame.contentWindow;
+    } catch {
+      return; // cross-origin؛ نباید رخ دهد چون هم‌مبدأ است
+    }
+    if (!doc || !win) return;
+    // جلوگیری از نصب دوباره روی همان سند
+    if ((doc as any).__touchEmuInstalled) return;
+    (doc as any).__touchEmuInstalled = true;
+
+    const D = doc;
+    const W = win;
+    const THRESHOLD = 4;
+
+    let dragging = false;
+    let moved = false;
+    let startX = 0, startY = 0, lastX = 0, lastY = 0;
+    let hEl: HTMLElement | null = null;
+    let vEl: HTMLElement | null = null;
+
+    const isScrollable = (el: HTMLElement, axis: 'x' | 'y'): boolean => {
+      if (!el || el === D.body || el === D.documentElement) return false;
+      const style = W.getComputedStyle(el);
+      const ov = axis === 'x' ? style.overflowX : style.overflowY;
+      if (ov !== 'auto' && ov !== 'scroll') return false;
+      return axis === 'x'
+        ? el.scrollWidth > el.clientWidth + 2
+        : el.scrollHeight > el.clientHeight + 2;
+    };
+
+    const findScroll = (start: EventTarget | null, axis: 'x' | 'y'): HTMLElement | null => {
+      let el = start as HTMLElement | null;
+      while (el && el !== D.body) {
+        if (isScrollable(el, axis)) return el;
+        el = el.parentElement;
+      }
+      return null;
+    };
+
+    const onDown = (e: MouseEvent) => {
+      if (!touchDragRef.current || e.button !== 0) return;
+      dragging = true;
+      moved = false;
+      startX = lastX = e.clientX;
+      startY = lastY = e.clientY;
+      hEl = findScroll(e.target, 'x');
+      vEl = findScroll(e.target, 'y');
+    };
+
+    const onMove = (e: MouseEvent) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (!moved && (Math.abs(e.clientX - startX) > THRESHOLD || Math.abs(e.clientY - startY) > THRESHOLD)) {
+        moved = true;
+        D.body.style.userSelect = 'none';
+        D.body.style.cursor = 'grabbing';
+      }
+      if (!moved) return;
+      e.preventDefault();
+      // کشیدن طبیعی مثل انگشت: محتوا با جهت حرکت دست می‌رود
+      if (hEl) hEl.scrollLeft -= dx;
+      if (vEl) vEl.scrollTop -= dy;
+      else W.scrollBy(0, -dy);
+    };
+
+    const end = () => {
+      if (dragging && moved) {
+        // کلیکِ بعد از کشیدن را بی‌اثر کن تا ناخواسته روی لینک/دکمه نزند
+        const swallow = (ev: Event) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          D.removeEventListener('click', swallow, true);
+        };
+        D.addEventListener('click', swallow, true);
+        setTimeout(() => D.removeEventListener('click', swallow, true), 60);
+      }
+      dragging = false;
+      moved = false;
+      hEl = null;
+      vEl = null;
+      D.body.style.userSelect = '';
+      D.body.style.cursor = '';
+    };
+
+    D.addEventListener('mousedown', onDown, true);
+    D.addEventListener('mousemove', onMove, { passive: false, capture: true });
+    D.addEventListener('mouseup', end, true);
+    D.addEventListener('mouseleave', end, true);
+  }, []);
 
   return (
     <div>
@@ -74,13 +177,12 @@ export default function MobilePreviewPanel() {
           نمایش موبایل
         </h2>
         <p className="text-xs text-gray-500">
-          ظاهر سایت را دقیقاً مثل صفحهٔ یک گوشی موبایل ببینید.
+          ظاهر سایت را دقیقاً مثل صفحهٔ یک گوشی موبایل ببینید و با کشیدن، کارت‌ها را لمسی جابه‌جا کنید.
         </p>
       </div>
 
       {/* نوار کنترل‌ها */}
       <div className="bg-white rounded-2xl border border-gray-100 p-4 mb-6 flex flex-wrap items-center gap-3">
-        {/* انتخاب مدل گوشی */}
         <div className="flex items-center gap-2">
           <label className="text-xs text-gray-500">مدل گوشی:</label>
           <select
@@ -96,7 +198,6 @@ export default function MobilePreviewPanel() {
           </select>
         </div>
 
-        {/* انتخاب صفحه */}
         <div className="flex items-center gap-2">
           <label className="text-xs text-gray-500">صفحه:</label>
           <select
@@ -113,6 +214,16 @@ export default function MobilePreviewPanel() {
         </div>
 
         <div className="flex items-center gap-2 mr-auto">
+          <button
+            onClick={() => setTouchDrag((v) => !v)}
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-colors ${
+              touchDrag ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-gray-50 text-gray-700 hover:bg-gray-100'
+            }`}
+            title="کشیدن لمسی (مثل انگشت روی گوشی)"
+          >
+            <Hand className="w-4 h-4" />
+            حالت لمسی: {touchDrag ? 'روشن' : 'خاموش'}
+          </button>
           <button
             onClick={() => setLandscape((v) => !v)}
             className="flex items-center gap-2 px-3 py-2 bg-gray-50 text-gray-700 rounded-xl text-sm font-medium hover:bg-gray-100 transition-colors"
@@ -151,7 +262,6 @@ export default function MobilePreviewPanel() {
             padding: 12,
           }}
         >
-          {/* ناچ (در صورت داشتن) */}
           {device.notch && !landscape && (
             <div
               className="absolute top-3 left-1/2 -translate-x-1/2 z-10 bg-black rounded-b-2xl"
@@ -159,18 +269,17 @@ export default function MobilePreviewPanel() {
             />
           )}
 
-          {/* صفحهٔ نمایش */}
           <div
             className="relative w-full h-full overflow-hidden bg-white"
-            style={{ borderRadius: device.radius }}
+            style={{ borderRadius: device.radius, cursor: touchDrag ? 'grab' : 'default' }}
           >
             <iframe
               key={`${device.id}-${landscape ? 'l' : 'p'}-${reloadKey}-${route}`}
               ref={iframeRef}
               src={src}
               title="پیش‌نمایش موبایل سایت"
+              onLoad={installTouchEmulation}
               className="w-full h-full border-0 bg-white"
-              // اطمینان از اینکه iframe دقیقاً عرض گوشی را به عنوان viewport ببیند
               style={{ width: frameW, height: frameH }}
             />
           </div>
@@ -179,7 +288,7 @@ export default function MobilePreviewPanel() {
 
       <p className="text-center text-xs text-gray-400 mt-3">
         اندازهٔ صفحه: {frameW}×{frameH} پیکسل — {device.label}
-        {landscape ? ' (افقی)' : ''}
+        {landscape ? ' (افقی)' : ''} — برای جابه‌جایی کارت‌ها، با ماوس بکشید (مثل لمس).
       </p>
     </div>
   );
